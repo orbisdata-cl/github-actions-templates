@@ -1,0 +1,320 @@
+name: CD — Dev
+
+on:
+  push:
+    branches:
+      - develop
+
+jobs:
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.VERSION }}
+      image: ${{ steps.meta.outputs.IMAGE }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image metadata
+        id: meta
+        run: |
+          VERSION="$(jq -r '.version' package.json)-$(echo $GITHUB_SHA | cut -c1-7)"
+          IMAGE="{dockerhub-username}/{nombre-imagen}:$VERSION"
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "IMAGE=$IMAGE"     >> $GITHUB_OUTPUT
+          echo "$IMAGE"           > image-name.txt
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Build Docker image (no push)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: |
+            {dockerhub-username}/{nombre-imagen}:${{ steps.meta.outputs.VERSION }}
+            {dockerhub-username}/{nombre-imagen}:develop-latest
+          build-args: |
+            # Agregar las variables de entorno de build aquí
+            # NEXT_PUBLIC_API_URL=${{ secrets.DEV_NEXT_PUBLIC_API_URL }}
+          cache-from: type=registry,ref={dockerhub-username}/{nombre-imagen}:buildcache
+          cache-to: type=registry,ref={dockerhub-username}/{nombre-imagen}:buildcache,mode=max
+
+      - name: Save image and metadata as artifact
+        run: docker save {dockerhub-username}/{nombre-imagen}:${{ steps.meta.outputs.VERSION }} -o image.tar
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: |
+            image.tar
+            image-name.txt
+          retention-days: 1
+
+  trivy:
+    name: Trivy Scan
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load Docker image
+        run: docker load -i image.tar
+
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Trivy — escaneo de vulnerabilidades
+        run: |
+          trivy image \
+            --format json \
+            --output trivy-results.json \
+            --exit-code 1 \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            --skip-dirs /usr/local/lib/node_modules/npm \
+            --skip-dirs /usr/local/lib/node_modules/corepack \
+            --input image.tar
+
+      - name: Upload Trivy results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-results
+          path: trivy-results.json
+          retention-days: 7
+
+  push:
+    name: Push Docker Image
+    runs-on: ubuntu-latest
+    needs: [trivy]
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load Docker image
+        run: docker load -i image.tar
+
+      - name: Read image name
+        id: meta
+        run: echo "IMAGE=$(cat image-name.txt)" >> $GITHUB_OUTPUT
+
+      - name: Login DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Push Docker image
+        run: |
+          docker push ${{ steps.meta.outputs.IMAGE }}
+          docker tag ${{ steps.meta.outputs.IMAGE }} {dockerhub-username}/{nombre-imagen}:develop-latest
+          docker push {dockerhub-username}/{nombre-imagen}:develop-latest
+
+  deploy:
+    name: Deploy to Dev
+    runs-on: ubuntu-latest
+    needs: [build, push]
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Set IMAGE env
+        run: echo "IMAGE=$(cat image-name.txt)" >> $GITHUB_ENV
+
+      - name: Validate secrets
+        run: |
+          MISSING=""
+          [ -z "${{ secrets.DEV_SSH_HOST }}" ]  && MISSING="$MISSING DEV_SSH_HOST"
+          [ -z "${{ secrets.DEV_SSH_USER }}" ]  && MISSING="$MISSING DEV_SSH_USER"
+          [ -z "${{ secrets.DEV_SSH_PEM }}" ]   && MISSING="$MISSING DEV_SSH_PEM"
+          # Agregar validación de secrets de la app aquí
+          if [ -n "$MISSING" ]; then
+            echo "❌ Secrets faltantes:$MISSING"
+            exit 1
+          fi
+          echo "✅ Todos los secrets presentes"
+
+      - name: Deploy con rollback via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEV_SSH_HOST }}
+          username: ${{ secrets.DEV_SSH_USER }}
+          key: ${{ secrets.DEV_SSH_PEM }}
+          envs: IMAGE
+          script: |
+            echo "Desplegando imagen: $IMAGE"
+
+            PREVIOUS=$(docker inspect {nombre-contenedor} --format='{{.Config.Image}}' 2>/dev/null || echo "")
+            echo "Imagen anterior: $PREVIOUS"
+
+            docker pull $IMAGE
+
+            docker stop {nombre-contenedor} 2>/dev/null || true
+            docker rm   {nombre-contenedor} 2>/dev/null || true
+
+            docker run -d \
+              --name {nombre-contenedor} \
+              --restart always \
+              --network {nombre-red} \
+              -p {puerto-externo}:{puerto-interno} \
+              --memory="512m" \
+              --memory-reservation="256m" \
+              -e STAGE=develop \
+              -e TZ=America/Santiago \
+              # Agregar variables de entorno de la app aquí
+              $IMAGE
+
+            echo "Health check..."
+            for i in $(seq 1 10); do
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:{puerto-interno}/ 2>/dev/null || echo "000")
+              echo "  intento $i: HTTP $STATUS"
+              if [ "$STATUS" = "200" ] || [ "$STATUS" = "307" ] || [ "$STATUS" = "302" ]; then
+                echo "Health check OK"
+                exit 0
+              fi
+              sleep 3
+            done
+
+            echo "Health check falló. Ejecutando rollback..."
+            docker stop {nombre-contenedor} 2>/dev/null || true
+            docker rm   {nombre-contenedor} 2>/dev/null || true
+
+            if [ -n "$PREVIOUS" ]; then
+              echo "Restaurando imagen anterior: $PREVIOUS"
+              docker run -d \
+                --name {nombre-contenedor} \
+                --restart always \
+                --network {nombre-red} \
+                -p {puerto-externo}:{puerto-interno} \
+                --memory="512m" \
+                --memory-reservation="256m" \
+                -e STAGE=develop \
+                -e TZ=America/Santiago \
+                $PREVIOUS
+              echo "Rollback completado a: $PREVIOUS"
+            else
+              echo "No hay imagen anterior para rollback"
+            fi
+            exit 1
+
+      - name: Limpiar imágenes viejas del servidor
+        if: success()
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEV_SSH_HOST }}
+          username: ${{ secrets.DEV_SSH_USER }}
+          key: ${{ secrets.DEV_SSH_PEM }}
+          script: |
+            docker images "{dockerhub-username}/{nombre-imagen}" --format "{{.Repository}}:{{.Tag}}" \
+              | grep -v "develop-latest" \
+              | grep -v "buildcache" \
+              | xargs -r docker rmi 2>/dev/null || true
+
+  notify:
+    name: Notify Discord
+    runs-on: ubuntu-latest
+    needs: [build, trivy, push, deploy]
+    if: always()
+    steps:
+      - name: Download Trivy results
+        uses: actions/download-artifact@v4
+        with:
+          name: trivy-results
+        continue-on-error: true
+
+      - name: Send Discord notification
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          ACTOR: ${{ github.actor }}
+          COMMIT_SHA: ${{ github.sha }}
+          COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          VERSION: ${{ needs.build.outputs.version }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          TRIVY_RESULT: ${{ needs.trivy.result }}
+          PUSH_RESULT: ${{ needs.push.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+        run: |
+          AVATAR="https://github.com/$ACTOR.png?size=32"
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          BUILD_ICON=$([ "$BUILD_RESULT"   = "success" ] && echo "✅" || echo "❌")
+          TRIVY_ICON=$([ "$TRIVY_RESULT"   = "success" ] && echo "✅" || ([ "$TRIVY_RESULT"  = "skipped" ] && echo "⏭️" || echo "❌"))
+          PUSH_ICON=$([ "$PUSH_RESULT"     = "success" ] && echo "✅" || ([ "$PUSH_RESULT"   = "skipped" ] && echo "⏭️" || echo "❌"))
+          DEPLOY_ICON=$([ "$DEPLOY_RESULT" = "success" ] && echo "✅" || ([ "$DEPLOY_RESULT" = "skipped" ] && echo "⏭️" || echo "❌"))
+
+          if [ "$DEPLOY_RESULT" = "success" ]; then
+            TITLE="✅ Deploy exitoso — {nombre-del-proyecto} [dev]"
+            COLOR=3066993
+          elif [ "$TRIVY_RESULT" = "failure" ]; then
+            TITLE="🛡️ Deploy bloqueado — vulnerabilidades críticas"
+            COLOR=15158332
+          elif [ "$DEPLOY_RESULT" = "failure" ]; then
+            TITLE="🔄 Deploy fallido — rollback ejecutado"
+            COLOR=16750848
+          elif [ "$BUILD_RESULT" = "failure" ]; then
+            TITLE="❌ Deploy fallido — error en build"
+            COLOR=15158332
+          else
+            TITLE="❌ Deploy fallido"
+            COLOR=15158332
+          fi
+
+          TRIVY_DETAIL="N/A"
+          if [ -f trivy-results.json ]; then
+            CRITICAL=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-results.json 2>/dev/null || echo 0)
+            HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy-results.json 2>/dev/null || echo 0)
+            TRIVY_DETAIL="CRITICAL: $CRITICAL  HIGH: $HIGH"
+          fi
+
+          jq -n \
+            --arg title "$TITLE" \
+            --argjson color "$COLOR" \
+            --arg actor "$ACTOR" \
+            --arg avatar "$AVATAR" \
+            --arg version "${VERSION:-N/A}" \
+            --arg commit "[$COMMIT_SHA]($COMMIT_URL)" \
+            --arg build "$BUILD_ICON Build" \
+            --arg trivy "$TRIVY_ICON Trivy" \
+            --arg trivy_detail "$TRIVY_DETAIL" \
+            --arg push "$PUSH_ICON Push" \
+            --arg deploy "$DEPLOY_ICON Deploy" \
+            --arg run_url "[Ver logs]($RUN_URL)" \
+            --arg ts "$TIMESTAMP" \
+            '{
+              embeds: [{
+                author: { name: $actor, icon_url: $avatar },
+                title: $title,
+                color: $color,
+                fields: [
+                  {name: "📦 Versión",    value: $version,      inline: true},
+                  {name: "🔀 Commit",     value: $commit,       inline: false},
+                  {name: "🔨 Build",      value: $build,        inline: true},
+                  {name: "🛡️ Trivy",      value: $trivy,        inline: true},
+                  {name: "🔍 Hallazgos",  value: $trivy_detail, inline: false},
+                  {name: "📤 Push",       value: $push,         inline: true},
+                  {name: "🚀 Deploy",     value: $deploy,       inline: true},
+                  {name: "🔗 Logs",       value: $run_url,      inline: false}
+                ],
+                timestamp: $ts
+              }]
+            }' | curl -s -X POST -H 'Content-Type: application/json' -d @- "$DISCORD_WEBHOOK"

@@ -1,0 +1,163 @@
+name: CD — Prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Tag de la imagen a desplegar (ej: 2.1.0-a3f9c12)'
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    name: Deploy to Prod
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate secrets
+        run: |
+          MISSING=""
+          [ -z "${{ secrets.PROD_SSH_HOST }}" ] && MISSING="$MISSING PROD_SSH_HOST"
+          [ -z "${{ secrets.PROD_SSH_USER }}" ] && MISSING="$MISSING PROD_SSH_USER"
+          [ -z "${{ secrets.PROD_SSH_PEM }}" ]  && MISSING="$MISSING PROD_SSH_PEM"
+          # Agregar validación de secrets de la app aquí
+          if [ -n "$MISSING" ]; then
+            echo "❌ Secrets faltantes:$MISSING"
+            exit 1
+          fi
+          echo "✅ Todos los secrets presentes"
+
+      - name: Set image name
+        run: |
+          IMAGE="{dockerhub-username}/{nombre-imagen}:${{ github.event.inputs.image_tag }}"
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+          echo "Imagen a desplegar: $IMAGE"
+
+      - name: Deploy con rollback via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_PEM }}
+          envs: IMAGE
+          script: |
+            echo "Desplegando imagen: $IMAGE"
+
+            PREVIOUS=$(docker inspect {nombre-contenedor} --format='{{.Config.Image}}' 2>/dev/null || echo "")
+            echo "Imagen anterior: $PREVIOUS"
+
+            docker pull $IMAGE
+
+            docker stop {nombre-contenedor} 2>/dev/null || true
+            docker rm   {nombre-contenedor} 2>/dev/null || true
+
+            docker run -d \
+              --name {nombre-contenedor} \
+              --restart always \
+              --network {nombre-red} \
+              -p {puerto-externo}:{puerto-interno} \
+              --memory="512m" \
+              --memory-reservation="256m" \
+              -e STAGE=production \
+              -e TZ=America/Santiago \
+              # Agregar variables de entorno de la app aquí
+              $IMAGE
+
+            echo "Health check..."
+            for i in $(seq 1 10); do
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:{puerto-interno}/ 2>/dev/null || echo "000")
+              echo "  intento $i: HTTP $STATUS"
+              if [ "$STATUS" = "200" ] || [ "$STATUS" = "307" ] || [ "$STATUS" = "302" ]; then
+                echo "Health check OK"
+                exit 0
+              fi
+              sleep 3
+            done
+
+            echo "Health check falló. Ejecutando rollback..."
+            docker stop {nombre-contenedor} 2>/dev/null || true
+            docker rm   {nombre-contenedor} 2>/dev/null || true
+
+            if [ -n "$PREVIOUS" ]; then
+              echo "Restaurando imagen anterior: $PREVIOUS"
+              docker run -d \
+                --name {nombre-contenedor} \
+                --restart always \
+                --network {nombre-red} \
+                -p {puerto-externo}:{puerto-interno} \
+                --memory="512m" \
+                --memory-reservation="256m" \
+                -e STAGE=production \
+                -e TZ=America/Santiago \
+                $PREVIOUS
+              echo "Rollback completado a: $PREVIOUS"
+            else
+              echo "No hay imagen anterior para rollback"
+            fi
+            exit 1
+
+      - name: Limpiar imágenes viejas del servidor
+        if: success()
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_PEM }}
+          script: |
+            docker images "{dockerhub-username}/{nombre-imagen}" --format "{{.Repository}}:{{.Tag}}" \
+              | grep -v "prod-latest" \
+              | grep -v "buildcache" \
+              | xargs -r docker rmi 2>/dev/null || true
+
+  notify:
+    name: Notify Discord
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    if: always()
+    steps:
+      - name: Send Discord notification
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          ACTOR: ${{ github.actor }}
+          IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+        run: |
+          AVATAR="https://github.com/$ACTOR.png?size=32"
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          DEPLOY_ICON=$([ "$DEPLOY_RESULT" = "success" ] && echo "✅" || echo "❌")
+
+          if [ "$DEPLOY_RESULT" = "success" ]; then
+            TITLE="✅ Deploy a producción exitoso — {nombre-del-proyecto}"
+            COLOR=3066993
+          elif [ "$DEPLOY_RESULT" = "failure" ]; then
+            TITLE="🔄 Deploy a producción fallido — rollback ejecutado"
+            COLOR=16750848
+          else
+            TITLE="❌ Deploy a producción fallido"
+            COLOR=15158332
+          fi
+
+          jq -n \
+            --arg title "$TITLE" \
+            --argjson color "$COLOR" \
+            --arg actor "$ACTOR" \
+            --arg avatar "$AVATAR" \
+            --arg tag "$IMAGE_TAG" \
+            --arg deploy "$DEPLOY_ICON Deploy" \
+            --arg run_url "[Ver logs]($RUN_URL)" \
+            --arg ts "$TIMESTAMP" \
+            '{
+              embeds: [{
+                author: { name: $actor, icon_url: $avatar },
+                title: $title,
+                color: $color,
+                fields: [
+                  {name: "📦 Imagen desplegada", value: $tag,      inline: true},
+                  {name: "👤 Desplegado por",    value: $actor,    inline: true},
+                  {name: "🚀 Deploy",            value: $deploy,   inline: false},
+                  {name: "🔗 Logs",              value: $run_url,  inline: false}
+                ],
+                timestamp: $ts
+              }]
+            }' | curl -s -X POST -H 'Content-Type: application/json' -d @- "$DISCORD_WEBHOOK"
