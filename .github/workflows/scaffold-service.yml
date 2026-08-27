@@ -389,6 +389,62 @@ jobs:
             --field branch="develop"
           echo "✅ CI workflow created"
 
+      - name: Set release tracking workflow
+        run: |
+          cat > /tmp/release-port.yml << 'RELEASEEOF'
+          name: Register Release in Port
+
+          on:
+            push:
+              tags:
+                - 'v*.*.*'
+
+          jobs:
+            register-release:
+              name: Register Release
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                  with:
+                    fetch-depth: 0
+                - name: Extract metadata
+                  id: meta
+                  run: |
+                    VERSION="${GITHUB_REF_NAME}"
+                    REPO="${GITHUB_REPOSITORY##*/}"
+                    TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+                    RELEASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${VERSION}"
+                    DEPLOYMENT_ID="${REPO}-${VERSION//\./-}"
+                    echo "VERSION=$VERSION"             >> $GITHUB_OUTPUT
+                    echo "REPO=$REPO"                   >> $GITHUB_OUTPUT
+                    echo "TIMESTAMP=$TIMESTAMP"         >> $GITHUB_OUTPUT
+                    echo "RELEASE_URL=$RELEASE_URL"     >> $GITHUB_OUTPUT
+                    echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
+                - name: Register deployment in Port
+                  env:
+                    PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+                    PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+                  run: |
+                    TOKEN=$(curl -s -X POST "https://api.port.io/v1/auth/access_token"                       -H "Content-Type: application/json"                       -d "{"clientId": "$PORT_CLIENT_ID", "clientSecret": "$PORT_CLIENT_SECRET"}"                       | jq -r '.accessToken')
+                    curl -s -X POST "https://api.port.io/v1/blueprints/deployment/entities?upsert=true"                       -H "Authorization: Bearer $TOKEN"                       -H "Content-Type: application/json"                       -d "{
+                        \"identifier\": \"${{ steps.meta.outputs.DEPLOYMENT_ID }}\",
+                        \"title\": \"${{ steps.meta.outputs.REPO }} ${{ steps.meta.outputs.VERSION }}\",
+                        \"properties\": {
+                          \"version\": \"${{ steps.meta.outputs.VERSION }}\",
+                          \"deploymentStatus\": \"Success\",
+                          \"environment\": \"production\",
+                          \"createdAt\": \"${{ steps.meta.outputs.TIMESTAMP }}\",
+                          \"deployed_by\": \"${{ github.actor }}\",
+                          \"commit_sha\": \"${{ github.sha }}\",
+                          \"release_url\": \"${{ steps.meta.outputs.RELEASE_URL }}\"
+                        },
+                        \"relations\": {\"service\": \"${{ steps.meta.outputs.REPO }}\"}
+                      }" | jq .ok
+          RELEASEEOF
+
+          gh api repos/$ORG/$SERVICE_NAME/contents/.github/workflows/release-port.yml             --method PUT             --field message="ci: add release tracking workflow for Port"             --field content="$(base64 < /tmp/release-port.yml)"             --field branch="develop"
+          echo "✅ Release tracking workflow created"
+
       - name: Add DISCORD_WEBHOOK_URL secret
         run: |
           gh secret set DISCORD_WEBHOOK_URL \

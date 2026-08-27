@@ -1,0 +1,86 @@
+name: Register Release in Port
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  register-release:
+    name: Register Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract metadata
+        id: meta
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          REPO="${GITHUB_REPOSITORY##*/}"
+          SHA="${GITHUB_SHA}"
+          SHORT_SHA=$(echo "$SHA" | cut -c1-7)
+          ACTOR="${GITHUB_ACTOR}"
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          RELEASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${VERSION}"
+          DEPLOYMENT_ID="${REPO}-${VERSION//\./-}"
+
+          echo "VERSION=$VERSION"           >> $GITHUB_OUTPUT
+          echo "REPO=$REPO"                 >> $GITHUB_OUTPUT
+          echo "SHA=$SHA"                   >> $GITHUB_OUTPUT
+          echo "SHORT_SHA=$SHORT_SHA"       >> $GITHUB_OUTPUT
+          echo "ACTOR=$ACTOR"               >> $GITHUB_OUTPUT
+          echo "TIMESTAMP=$TIMESTAMP"       >> $GITHUB_OUTPUT
+          echo "RELEASE_URL=$RELEASE_URL"   >> $GITHUB_OUTPUT
+          echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
+
+          echo "📦 Version: $VERSION"
+          echo "🔀 Repo: $REPO"
+          echo "👤 Actor: $ACTOR"
+
+      - name: Register deployment in Port
+        env:
+          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+        run: |
+          TOKEN=$(curl -s -X POST "https://api.port.io/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\": \"$PORT_CLIENT_ID\", \"clientSecret\": \"$PORT_CLIENT_SECRET\"}" \
+            | jq -r '.accessToken')
+
+          curl -s -X POST "https://api.port.io/v1/blueprints/deployment/entities?upsert=true" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"identifier\": \"${{ steps.meta.outputs.DEPLOYMENT_ID }}\",
+              \"title\": \"${{ steps.meta.outputs.REPO }} ${{ steps.meta.outputs.VERSION }}\",
+              \"properties\": {
+                \"version\": \"${{ steps.meta.outputs.VERSION }}\",
+                \"deploymentStatus\": \"Success\",
+                \"environment\": \"production\",
+                \"createdAt\": \"${{ steps.meta.outputs.TIMESTAMP }}\",
+                \"deployed_by\": \"${{ steps.meta.outputs.ACTOR }}\",
+                \"commit_sha\": \"${{ steps.meta.outputs.SHA }}\",
+                \"release_url\": \"${{ steps.meta.outputs.RELEASE_URL }}\"
+              },
+              \"relations\": {
+                \"service\": \"${{ steps.meta.outputs.REPO }}\"
+              }
+            }" | jq '{ok: .ok, id: .entity.identifier}'
+
+          echo "✅ Deployment registered in Port"
+
+      - name: Summary
+        run: |
+          echo "## 🚀 Release registered in Port" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Service** | ${{ steps.meta.outputs.REPO }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Version** | ${{ steps.meta.outputs.VERSION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Deployed by** | ${{ steps.meta.outputs.ACTOR }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | \`${{ steps.meta.outputs.SHORT_SHA }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Release** | [${{ steps.meta.outputs.VERSION }}](${{ steps.meta.outputs.RELEASE_URL }}) |" >> $GITHUB_STEP_SUMMARY
