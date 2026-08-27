@@ -107,17 +107,13 @@ jobs:
             | jq -r '.accessToken')
 
           # Upsert githubUser entity
-          curl -s -X POST "https://api.port.io/v1/blueprints/githubUser/entities?upsert=true" \
+          curl -s -X PATCH "https://api.port.io/v1/blueprints/githubUser/entities/$GITHUB_USERNAME" \
             -H "Authorization: Bearer $TOKEN" \
             -H "Content-Type: application/json" \
             -d "{
-              \"identifier\": \"$GITHUB_USERNAME\",
               \"title\": \"$FULL_NAME\",
               \"properties\": {
                 \"login\": \"$GITHUB_USERNAME\"
-              },
-              \"relations\": {
-                \"team\": [\"$EQUIPO_TECNICO\"]
               }
             }" | jq '{ok: .ok}'
 
