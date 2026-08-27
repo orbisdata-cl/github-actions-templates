@@ -1,0 +1,99 @@
+name: Create Project Team
+
+on:
+  workflow_dispatch:
+    inputs:
+      team_slug:
+        description: "Team slug (lowercase, hyphens only. e.g. si-pagos)"
+        required: true
+        type: string
+      display_name:
+        description: "Display name (e.g. Sistema Pagos)"
+        required: true
+        type: string
+      description:
+        description: "Short description of the team"
+        required: true
+        type: string
+      port_client_id:
+        description: "Port client ID"
+        required: true
+        type: string
+      port_client_secret:
+        description: "Port client secret"
+        required: true
+        type: string
+
+jobs:
+  create-team:
+    name: Create Project Team
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.SCAFFOLD_GH_TOKEN }}
+      ORG: orbisdata-cl
+      TEAM_SLUG: ${{ inputs.team_slug }}
+      DISPLAY_NAME: ${{ inputs.display_name }}
+      DESCRIPTION: ${{ inputs.description }}
+
+    steps:
+      - name: Validate team slug
+        run: |
+          if ! echo "$TEAM_SLUG" | grep -qE '^[a-z][a-z0-9-]+$'; then
+            echo "❌ Invalid slug. Use lowercase letters, numbers and hyphens only."
+            exit 1
+          fi
+          echo "✅ Slug valid: $TEAM_SLUG"
+
+      - name: Check team does not exist
+        run: |
+          STATUS=$(gh api orgs/$ORG/teams/$TEAM_SLUG --silent 2>&1 && echo "exists" || echo "not_found")
+          if [ "$STATUS" = "exists" ]; then
+            echo "❌ Team '$TEAM_SLUG' already exists in GitHub."
+            exit 1
+          fi
+          echo "✅ Team slug available"
+
+      - name: Create GitHub team
+        run: |
+          gh api orgs/$ORG/teams \
+            --method POST \
+            --field name="$DISPLAY_NAME" \
+            --field description="$DESCRIPTION" \
+            --field privacy="closed"
+          echo "✅ GitHub team created: $DISPLAY_NAME"
+
+      - name: Add team to sistemas-internos (parent)
+        run: |
+          PARENT_ID=$(gh api orgs/$ORG/teams/sistemas-internos --jq '.id')
+          NEW_TEAM_ID=$(gh api orgs/$ORG/teams/$TEAM_SLUG --jq '.id' 2>/dev/null || \
+            gh api orgs/$ORG/teams --jq "[.[] | select(.name == \"$DISPLAY_NAME\")] | .[0].id")
+          gh api orgs/$ORG/teams/$TEAM_SLUG \
+            --method PATCH \
+            --field parent_team_id=$PARENT_ID 2>/dev/null || true
+          echo "✅ Team linked to sistemas-internos"
+
+      - name: Register team in Port
+        run: |
+          TOKEN=$(curl -s -X POST "https://api.port.io/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\": \"${{ inputs.port_client_id }}\", \"clientSecret\": \"${{ inputs.port_client_secret }}\"}" \
+            | jq -r '.accessToken')
+
+          curl -s -X POST "https://api.port.io/v1/teams" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"name\": \"$DISPLAY_NAME\", \"description\": \"$DESCRIPTION\"}" \
+            | jq '{ok: (. | has("team")), name: .team.name}'
+
+          echo "✅ Team registered in Port"
+
+      - name: Summary
+        run: |
+          echo "## ✅ Team created successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Slug** | \`$TEAM_SLUG\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Name** | $DISPLAY_NAME |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Description** | $DESCRIPTION |" >> $GITHUB_STEP_SUMMARY
+          echo "| **GitHub** | [View team](https://github.com/orgs/$ORG/teams/$TEAM_SLUG) |" >> $GITHUB_STEP_SUMMARY
