@@ -60,7 +60,7 @@ jobs:
               \"properties\": {
                 \"version\": \"${{ steps.meta.outputs.VERSION }}\",
                 \"deploymentStatus\": \"Success\",
-                \"environment\": \"production\",
+                \"environment\": \"Production\",
                 \"createdAt\": \"${{ steps.meta.outputs.TIMESTAMP }}\",
                 \"deployed_by\": \"${{ steps.meta.outputs.ACTOR }}\",
                 \"commit_sha\": \"${{ steps.meta.outputs.SHA }}\",
