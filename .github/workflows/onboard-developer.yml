@@ -1,0 +1,176 @@
+name: Onboard Developer
+
+on:
+  workflow_dispatch:
+    inputs:
+      github_username:
+        description: "GitHub username"
+        required: true
+        type: string
+      full_name:
+        description: "Full name"
+        required: true
+        type: string
+      equipo_tecnico:
+        description: "Technical team"
+        required: true
+        type: choice
+        options: [equipo_desarrollo, equipo_rpa]
+      proyecto:
+        description: "Project team slug"
+        required: true
+        type: choice
+        options:
+          - si-lme
+          - si-userhub
+          - si-midt
+          - si-secretos
+          - si-kairos
+          - eurocapital
+          - rpa
+          - sistemas-internos
+      discord_webhook_url:
+        description: "Discord webhook URL for notification"
+        required: true
+        type: string
+      port_client_id:
+        description: "Port client ID"
+        required: true
+        type: string
+      port_client_secret:
+        description: "Port client secret"
+        required: true
+        type: string
+
+jobs:
+  onboard:
+    name: Onboard Developer
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.SCAFFOLD_GH_TOKEN }}
+      ORG: orbisdata-cl
+      GITHUB_USERNAME: ${{ inputs.github_username }}
+      FULL_NAME: ${{ inputs.full_name }}
+      EQUIPO_TECNICO: ${{ inputs.equipo_tecnico }}
+      PROYECTO: ${{ inputs.proyecto }}
+
+    steps:
+      - name: Validate GitHub user exists
+        run: |
+          STATUS=$(gh api users/$GITHUB_USERNAME --silent 2>&1 && echo "exists" || echo "not_found")
+          if [ "$STATUS" = "not_found" ]; then
+            echo "❌ GitHub user '$GITHUB_USERNAME' does not exist."
+            exit 1
+          fi
+          echo "✅ GitHub user found: $GITHUB_USERNAME"
+
+      - name: Check user not already in org
+        run: |
+          STATUS=$(gh api orgs/$ORG/members/$GITHUB_USERNAME --silent 2>&1 && echo "member" || echo "not_member")
+          if [ "$STATUS" = "member" ]; then
+            echo "⚠️ User $GITHUB_USERNAME is already a member of the org. Skipping invitation."
+            echo "ALREADY_MEMBER=true" >> $GITHUB_ENV
+          else
+            echo "ALREADY_MEMBER=false" >> $GITHUB_ENV
+            echo "✅ User is not yet a member"
+          fi
+
+      - name: Invite to org
+        if: env.ALREADY_MEMBER == 'false'
+        run: |
+          USER_ID=$(gh api users/$GITHUB_USERNAME --jq '.id')
+          gh api orgs/$ORG/invitations \
+            --method POST \
+            --field invitee_id=$USER_ID \
+            --field role="direct_member"
+          echo "✅ Invitation sent to $GITHUB_USERNAME"
+
+      - name: Add to proyecto team
+        run: |
+          gh api orgs/$ORG/teams/$PROYECTO/memberships/$GITHUB_USERNAME \
+            --method PUT \
+            --field role="member"
+          echo "✅ Added to team: $PROYECTO"
+
+      - name: Add to equipo tecnico team
+        run: |
+          gh api orgs/$ORG/teams/$EQUIPO_TECNICO/memberships/$GITHUB_USERNAME \
+            --method PUT \
+            --field role="member" 2>/dev/null || \
+          gh api orgs/$ORG/teams/${EQUIPO_TECNICO//_/-}/memberships/$GITHUB_USERNAME \
+            --method PUT \
+            --field role="member"
+          echo "✅ Added to equipo: $EQUIPO_TECNICO"
+
+      - name: Register in Port
+        run: |
+          TOKEN=$(curl -s -X POST "https://api.port.io/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\": \"${{ inputs.port_client_id }}\", \"clientSecret\": \"${{ inputs.port_client_secret }}\"}" \
+            | jq -r '.accessToken')
+
+          # Upsert githubUser entity
+          curl -s -X POST "https://api.port.io/v1/blueprints/githubUser/entities?upsert=true" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"identifier\": \"$GITHUB_USERNAME\",
+              \"title\": \"$FULL_NAME\",
+              \"properties\": {
+                \"login\": \"$GITHUB_USERNAME\"
+              },
+              \"relations\": {
+                \"team\": [\"$EQUIPO_TECNICO\"]
+              }
+            }" | jq '{ok: .ok}'
+
+          echo "✅ Registered in Port"
+
+      - name: Notify Discord
+        env:
+          DISCORD_WEBHOOK: ${{ inputs.discord_webhook_url }}
+        run: |
+          AVATAR="https://github.com/$GITHUB_USERNAME.png?size=64"
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          ALREADY=${{ env.ALREADY_MEMBER }}
+
+          if [ "$ALREADY" = "true" ]; then
+            INVITE_STATUS="⚠️ Ya era miembro de la org"
+          else
+            INVITE_STATUS="✅ Invitación enviada"
+          fi
+
+          jq -n \
+            --arg name "$FULL_NAME (@$GITHUB_USERNAME)" \
+            --arg avatar "$AVATAR" \
+            --arg equipo "$EQUIPO_TECNICO" \
+            --arg proyecto "$PROYECTO" \
+            --arg invite "$INVITE_STATUS" \
+            --arg ts "$TIMESTAMP" \
+            '{
+              embeds: [{
+                author: {name: $name, icon_url: $avatar},
+                title: "👋 Nuevo developer onboarded",
+                color: 3066993,
+                fields: [
+                  {name: "👤 GitHub", value: $name, inline: false},
+                  {name: "🏢 Equipo técnico", value: $equipo, inline: true},
+                  {name: "📦 Proyecto", value: $proyecto, inline: true},
+                  {name: "📬 Invitación", value: $invite, inline: false}
+                ],
+                timestamp: $ts
+              }]
+            }' | curl -s -X POST -H 'Content-Type: application/json' -d @- "$DISCORD_WEBHOOK"
+
+          echo "✅ Discord notified"
+
+      - name: Summary
+        run: |
+          echo "## 👋 Developer onboarded successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Name** | $FULL_NAME |" >> $GITHUB_STEP_SUMMARY
+          echo "| **GitHub** | [@$GITHUB_USERNAME](https://github.com/$GITHUB_USERNAME) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Equipo técnico** | $EQUIPO_TECNICO |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Proyecto** | $PROYECTO |" >> $GITHUB_STEP_SUMMARY
