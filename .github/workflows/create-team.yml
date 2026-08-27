@@ -55,21 +55,21 @@ jobs:
 
       - name: Create GitHub team
         run: |
+          # GitHub genera el slug desde el name — usamos team_slug como name
+          # para que el slug resultante sea exactamente el que pedimos
           gh api orgs/$ORG/teams \
             --method POST \
-            --field name="$DISPLAY_NAME" \
+            --field name="$TEAM_SLUG" \
             --field description="$DESCRIPTION" \
             --field privacy="closed"
-          echo "✅ GitHub team created: $DISPLAY_NAME"
+          echo "✅ GitHub team created with slug: $TEAM_SLUG"
 
       - name: Add team to sistemas-internos (parent)
         run: |
           PARENT_ID=$(gh api orgs/$ORG/teams/sistemas-internos --jq '.id')
-          NEW_TEAM_ID=$(gh api orgs/$ORG/teams/$TEAM_SLUG --jq '.id' 2>/dev/null || \
-            gh api orgs/$ORG/teams --jq "[.[] | select(.name == \"$DISPLAY_NAME\")] | .[0].id")
           gh api orgs/$ORG/teams/$TEAM_SLUG \
             --method PATCH \
-            --field parent_team_id=$PARENT_ID 2>/dev/null || true
+            --field parent_team_id=$PARENT_ID
           echo "✅ Team linked to sistemas-internos"
 
       - name: Register team in Port
