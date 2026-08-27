@@ -29,10 +29,6 @@ on:
           - eurocapital
           - rpa
           - sistemas-internos
-      discord_webhook_url:
-        description: "Discord webhook URL for notification"
-        required: true
-        type: string
       port_client_id:
         description: "Port client ID"
         required: true
@@ -121,7 +117,7 @@ jobs:
 
       - name: Notify Discord
         env:
-          DISCORD_WEBHOOK: ${{ inputs.discord_webhook_url }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_NOTIFICATIONS }}
         run: |
           AVATAR="https://github.com/$GITHUB_USERNAME.png?size=64"
           TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
