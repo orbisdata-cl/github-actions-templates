@@ -1,0 +1,92 @@
+name: Deprecate Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_id:
+        description: "Service identifier in Port (e.g. secretos-frontend)"
+        required: true
+        type: string
+      reason:
+        description: "Reason for deprecation"
+        required: true
+        type: string
+      port_client_id:
+        description: "Port client ID"
+        required: true
+        type: string
+      port_client_secret:
+        description: "Port client secret"
+        required: true
+        type: string
+
+jobs:
+  deprecate:
+    name: Deprecate Service
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.SCAFFOLD_GH_TOKEN }}
+      ORG: orbisdata-cl
+      SERVICE_ID: ${{ inputs.service_id }}
+      REASON: ${{ inputs.reason }}
+
+    steps:
+      - name: Get service from Port
+        run: |
+          TOKEN=$(curl -s -X POST "https://api.port.io/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\": \"${{ inputs.port_client_id }}\", \"clientSecret\": \"${{ inputs.port_client_secret }}\"}" \
+            | jq -r '.accessToken')
+          echo "PORT_TOKEN=$TOKEN" >> $GITHUB_ENV
+
+          REPO=$(curl -s "https://api.port.io/v1/blueprints/service/entities/$SERVICE_ID" \
+            -H "Authorization: Bearer $TOKEN" \
+            | jq -r '.entity.relations.github_repository // .entity.identifier')
+          echo "REPO=$REPO" >> $GITHUB_ENV
+          echo "✅ Service found — linked repo: $REPO"
+
+      - name: Check repo exists and is not already archived
+        run: |
+          STATUS=$(gh api repos/$ORG/$REPO --jq '.archived')
+          if [ "$STATUS" = "true" ]; then
+            echo "⚠️ Repo $REPO is already archived."
+            echo "ALREADY_ARCHIVED=true" >> $GITHUB_ENV
+          else
+            echo "ALREADY_ARCHIVED=false" >> $GITHUB_ENV
+            echo "✅ Repo is active"
+          fi
+
+      - name: Archive GitHub repo
+        if: env.ALREADY_ARCHIVED == 'false'
+        run: |
+          gh api repos/$ORG/$REPO \
+            --method PATCH \
+            --field archived=true
+          echo "✅ Repo archived: $REPO"
+
+      - name: Mark as deprecated in Port
+        run: |
+          # Agregar propiedad deprecated + reason al servicio
+          curl -s -X PATCH "https://api.port.io/v1/blueprints/service/entities/$SERVICE_ID" \
+            -H "Authorization: Bearer $PORT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"properties\": {
+                \"criticality\": \"low\",
+                \"deprecated\": true,
+                \"deprecated_reason\": \"$REASON\",
+                \"deprecated_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
+              }
+            }" | jq '{ok: .ok}'
+          echo "✅ Service marked as deprecated in Port"
+
+      - name: Summary
+        run: |
+          echo "## 🗄️ Service deprecated" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Service** | $SERVICE_ID |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Repo** | [orbisdata-cl/$REPO](https://github.com/orbisdata-cl/$REPO) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Reason** | $REASON |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Archived** | $([ \"$ALREADY_ARCHIVED\" = 'true' ] && echo 'Already archived' || echo 'Yes') |" >> $GITHUB_STEP_SUMMARY
