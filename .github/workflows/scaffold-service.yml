@@ -57,7 +57,7 @@ jobs:
       STACK: ${{ inputs.stack }}
       CRITICALITY: ${{ inputs.criticality }}
       DESCRIPTION: ${{ inputs.description }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.SCAFFOLD_GH_TOKEN }}
       ORG: orbisdata-cl
 
     steps:
