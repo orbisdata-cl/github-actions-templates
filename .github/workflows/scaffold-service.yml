@@ -1,0 +1,455 @@
+name: Scaffold New Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_name:
+        description: "Service name (e.g. lme-ms-pagos)"
+        required: true
+        type: string
+      service_type:
+        description: "Service type"
+        required: true
+        type: choice
+        options: [frontend, backend, api-gateway, rpa, worker]
+      team:
+        description: "Team"
+        required: true
+        type: choice
+        options: [equipo_desarrollo, equipo_rpa]
+      stack:
+        description: "Stack"
+        required: true
+        type: choice
+        options: [nestjs, nextjs, python, nodejs]
+      criticality:
+        description: "Criticality"
+        required: true
+        type: choice
+        options: [critical, high, medium, low]
+      description:
+        description: "Short description"
+        required: true
+        type: string
+      discord_webhook_url:
+        description: "Discord webhook URL for CI notifications"
+        required: true
+        type: string
+      port_client_id:
+        description: "Port client ID"
+        required: true
+        type: string
+      port_client_secret:
+        description: "Port client secret"
+        required: true
+        type: string
+
+jobs:
+  scaffold:
+    name: Scaffold Service
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      SERVICE_NAME: ${{ inputs.service_name }}
+      SERVICE_TYPE: ${{ inputs.service_type }}
+      TEAM: ${{ inputs.team }}
+      STACK: ${{ inputs.stack }}
+      CRITICALITY: ${{ inputs.criticality }}
+      DESCRIPTION: ${{ inputs.description }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ORG: orbisdata-cl
+
+    steps:
+      - name: Validate service name
+        run: |
+          if ! echo "$SERVICE_NAME" | grep -qE '^[a-z][a-z0-9-]+$'; then
+            echo "❌ Invalid service name. Use lowercase letters, numbers and hyphens only."
+            exit 1
+          fi
+          echo "✅ Service name valid: $SERVICE_NAME"
+
+      - name: Check repo does not exist
+        run: |
+          STATUS=$(gh api repos/$ORG/$SERVICE_NAME --silent 2>&1 && echo "exists" || echo "not_found")
+          if [ "$STATUS" = "exists" ]; then
+            echo "❌ Repository $ORG/$SERVICE_NAME already exists."
+            exit 1
+          fi
+          echo "✅ Repository name available"
+
+      - name: Create repository
+        run: |
+          gh api orgs/$ORG/repos \
+            --method POST \
+            --field name="$SERVICE_NAME" \
+            --field description="$DESCRIPTION" \
+            --field private=true \
+            --field auto_init=true \
+            --field gitignore_template="" \
+            --field default_branch="main"
+          echo "✅ Repository created: $ORG/$SERVICE_NAME"
+          sleep 3
+
+      - name: Create develop branch
+        run: |
+          SHA=$(gh api repos/$ORG/$SERVICE_NAME/git/refs/heads/main --jq '.object.sha')
+          gh api repos/$ORG/$SERVICE_NAME/git/refs \
+            --method POST \
+            --field ref="refs/heads/develop" \
+            --field sha="$SHA"
+          echo "✅ Branch develop created"
+
+      - name: Set default branch to develop
+        run: |
+          gh api repos/$ORG/$SERVICE_NAME \
+            --method PATCH \
+            --field default_branch="develop"
+          echo "✅ Default branch set to develop"
+
+      - name: Set CODEOWNERS
+        run: |
+          if [ "$TEAM" = "equipo_rpa" ]; then
+            OWNER="@orbisdata-cl/alfonso-chiguay-orbis"
+          else
+            OWNER="@orbisdata-cl/pmorenocla"
+          fi
+
+          CONTENT="* $OWNER"
+          gh api repos/$ORG/$SERVICE_NAME/contents/.github/CODEOWNERS \
+            --method PUT \
+            --field message="ci: add CODEOWNERS" \
+            --field content="$(echo "$CONTENT" | base64)" \
+            --field branch="develop"
+          echo "✅ CODEOWNERS created ($OWNER)"
+
+      - name: Set PR template
+        run: |
+          CONTENT='## 📋 Description
+
+<!-- Briefly describe what this PR does and why. Link the related issue if applicable. -->
+
+Closes #
+
+## 🔄 Type of Change
+
+- [ ] 🐛 Bug fix
+- [ ] ✨ New feature
+- [ ] 🔨 Refactor
+- [ ] 📝 Documentation
+- [ ] 🔧 Configuration / Infrastructure
+- [ ] ⚡ Performance improvement
+
+## ✅ Checklist
+
+- [ ] Code follows the project conventions
+- [ ] Self-reviewed the code
+- [ ] Added / updated tests
+- [ ] No new warnings or errors introduced
+- [ ] Relevant documentation updated
+
+## 🧪 How to Test
+
+1. 
+2. 
+3. 
+
+## 📸 Screenshots (if applicable)
+
+## 💬 Additional Notes'
+
+          gh api repos/$ORG/$SERVICE_NAME/contents/.github/pull_request_template.md \
+            --method PUT \
+            --field message="ci: add PR template" \
+            --field content="$(echo "$CONTENT" | base64)" \
+            --field branch="develop"
+          echo "✅ PR template created"
+
+      - name: Set .gitignore
+        run: |
+          case "$STACK" in
+            nestjs|nodejs)
+              GITIGNORE="node_modules/\ndist/\ncoverage/\n.env\n.env.local\n*.log\n.DS_Store"
+              ;;
+            nextjs)
+              GITIGNORE="node_modules/\n.next/\nout/\ncoverage/\n.env*.local\n*.log\n.DS_Store\n*.tsbuildinfo"
+              ;;
+            python)
+              GITIGNORE "__pycache__/\n*.pyc\n*.pyo\n.venv/\nvenv/\n.env\n*.log\n.DS_Store\ndist/\nbuild/"
+              ;;
+          esac
+
+          gh api repos/$ORG/$SERVICE_NAME/contents/.gitignore \
+            --method PUT \
+            --field message="ci: add .gitignore" \
+            --field content="$(printf "$GITIGNORE" | base64)" \
+            --field branch="develop"
+          echo "✅ .gitignore created ($STACK)"
+
+      - name: Set sonar-project.properties
+        run: |
+          case "$STACK" in
+            nestjs|nodejs)
+              SOURCES="./src"
+              EXCLUSIONS="**/*.spec.ts,**/*.module.ts,**/*.config.ts,node_modules/**,coverage/**,dist/**"
+              LCOV="./coverage/lcov.info"
+              ;;
+            nextjs)
+              SOURCES="./src"
+              EXCLUSIONS="**/*.spec.ts,node_modules/**,coverage/**,.next/**,out/**"
+              LCOV="./coverage/lcov.info"
+              ;;
+            python)
+              SOURCES="."
+              EXCLUSIONS="**/__pycache__/**,**/tests/**,**/.venv/**"
+              LCOV="coverage.xml"
+              ;;
+          esac
+
+          CONTENT="sonar.projectKey=$SERVICE_NAME
+sonar.projectName=$SERVICE_NAME
+sonar.projectVersion=1.0.0
+sonar.sources=$SOURCES
+sonar.exclusions=$EXCLUSIONS
+sonar.javascript.lcov.reportPaths=$LCOV
+sonar.sourceEncoding=UTF-8"
+
+          gh api repos/$ORG/$SERVICE_NAME/contents/sonar-project.properties \
+            --method PUT \
+            --field message="ci: add SonarQube configuration" \
+            --field content="$(echo "$CONTENT" | base64)" \
+            --field branch="develop"
+          echo "✅ sonar-project.properties created"
+
+      - name: Set README
+        run: |
+          STACK_BADGE=""
+          case "$STACK" in
+            nestjs)  STACK_BADGE="NestJS" ;;
+            nextjs)  STACK_BADGE="Next.js" ;;
+            python)  STACK_BADGE="Python" ;;
+            nodejs)  STACK_BADGE="Node.js" ;;
+          esac
+
+          CONTENT="# $SERVICE_NAME
+
+$DESCRIPTION
+
+## Stack
+
+- **Framework**: $STACK_BADGE
+- **Type**: $SERVICE_TYPE
+- **Team**: $TEAM
+- **Criticality**: $CRITICALITY
+
+## Getting Started
+
+\`\`\`bash
+# Install dependencies
+npm install
+
+# Run in development
+npm run dev
+
+# Run tests
+npm run test:coverage
+\`\`\`
+
+## CI/CD
+
+- **CI**: Runs on every PR to \`develop\` and \`main\` — lint, test, SonarQube
+- **Sonar**: [$SERVICE_NAME](https://sonar.orbisdata.cl/dashboard?id=$SERVICE_NAME)"
+
+          gh api repos/$ORG/$SERVICE_NAME/contents/README.md \
+            --method PUT \
+            --field message="docs: initial README" \
+            --field content="$(echo "$CONTENT" | base64)" \
+            --field branch="develop"
+          echo "✅ README created"
+
+      - name: Set CI workflow
+        run: |
+          CONTENT="name: CI
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - main
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+
+  test:
+    name: Test & Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+      - run: npm ci
+      - run: npm run test:coverage
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 7
+
+  sonar:
+    name: SonarQube Analysis
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: needs.test.result == 'success'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: \${{ secrets.SONAR_APP_ID }}
+          private-key: \${{ secrets.SONAR_APP_PRIVATE_KEY }}
+      - uses: SonarSource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN: \${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: \${{ secrets.SONAR_HOST_URL }}
+          GITHUB_TOKEN: \${{ steps.app-token.outputs.token }}
+
+  notify:
+    name: Notify Discord
+    runs-on: ubuntu-latest
+    needs: [lint, test, sonar]
+    if: always()
+    steps:
+      - name: Send Discord notification
+        env:
+          DISCORD_WEBHOOK: \${{ secrets.DISCORD_WEBHOOK_URL }}
+          ACTOR: \${{ github.actor }}
+          PR_TITLE: \${{ github.event.pull_request.title }}
+          PR_URL: \${{ github.event.pull_request.html_url }}
+          RUN_URL: \${{ github.server_url }}/\${{ github.repository }}/actions/runs/\${{ github.run_id }}
+          LINT_RESULT: \${{ needs.lint.result }}
+          TEST_RESULT: \${{ needs.test.result }}
+          SONAR_RESULT: \${{ needs.sonar.result }}
+        run: |
+          AVATAR=\"https://github.com/\$ACTOR.png?size=32\"
+          TIMESTAMP=\$(date -u +\"%Y-%m-%dT%H:%M:%SZ\")
+
+          LINT_ICON=\$( [ \"\$LINT_RESULT\"  = \"success\" ] && echo \"✅\" || ([ \"\$LINT_RESULT\"  = \"skipped\" ] && echo \"⏭️\" || echo \"❌\"))
+          TEST_ICON=\$( [ \"\$TEST_RESULT\"  = \"success\" ] && echo \"✅\" || ([ \"\$TEST_RESULT\"  = \"skipped\" ] && echo \"⏭️\" || echo \"❌\"))
+          SONAR_ICON=\$([ \"\$SONAR_RESULT\" = \"success\" ] && echo \"✅\" || ([ \"\$SONAR_RESULT\" = \"skipped\" ] && echo \"⏭️\" || echo \"❌\"))
+
+          if [ \"\$LINT_RESULT\" = \"success\" ] && [ \"\$TEST_RESULT\" = \"success\" ] && [ \"\$SONAR_RESULT\" = \"success\" ]; then
+            TITLE=\"✅ CI OK — $SERVICE_NAME\"
+            COLOR=3066993
+          else
+            TITLE=\"❌ CI fallido — $SERVICE_NAME\"
+            COLOR=15158332
+          fi
+
+          jq -n \\
+            --arg title \"\$TITLE\" \\
+            --argjson color \"\$COLOR\" \\
+            --arg actor \"\$ACTOR\" \\
+            --arg avatar \"\$AVATAR\" \\
+            --arg pr \"[\${PR_TITLE}](\${PR_URL})\" \\
+            --arg lint \"\$LINT_ICON Lint\" \\
+            --arg test \"\$TEST_ICON Test\" \\
+            --arg sonar \"\$SONAR_ICON Sonar\" \\
+            --arg run_url \"[Ver logs](\$RUN_URL)\" \\
+            --arg ts \"\$TIMESTAMP\" \\
+            '{
+              embeds: [{
+                author: { name: \$actor, icon_url: \$avatar },
+                title: \$title,
+                color: \$color,
+                fields: [
+                  {name: \"🔀 Pull Request\", value: \$pr,      inline: false},
+                  {name: \"🔍 Lint\",         value: \$lint,    inline: true},
+                  {name: \"🧪 Test\",         value: \$test,    inline: true},
+                  {name: \"📊 Sonar\",        value: \$sonar,   inline: true},
+                  {name: \"🔗 Logs\",         value: \$run_url, inline: false}
+                ],
+                timestamp: \$ts
+              }]
+            }' | curl -s -X POST -H 'Content-Type: application/json' -d @- \"\$DISCORD_WEBHOOK\""
+
+          gh api repos/$ORG/$SERVICE_NAME/contents/.github/workflows/ci.yml \
+            --method PUT \
+            --field message="ci: add CI workflow" \
+            --field content="$(echo "$CONTENT" | base64)" \
+            --field branch="develop"
+          echo "✅ CI workflow created"
+
+      - name: Add DISCORD_WEBHOOK_URL secret to repo
+        run: |
+          gh secret set DISCORD_WEBHOOK_URL \
+            --body "${{ inputs.discord_webhook_url }}" \
+            --repo $ORG/$SERVICE_NAME
+          echo "✅ Discord webhook secret added"
+
+      - name: Register service in Port
+        run: |
+          TOKEN=$(curl -s -X POST "https://api.port.io/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\": \"${{ inputs.port_client_id }}\", \"clientSecret\": \"${{ inputs.port_client_secret }}\"}" \
+            | jq -r '.accessToken')
+
+          curl -s -X POST "https://api.port.io/v1/blueprints/service/entities?upsert=true" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"identifier\": \"$SERVICE_NAME\",
+              \"title\": \"$SERVICE_NAME\",
+              \"team\": [\"$TEAM\"],
+              \"properties\": {
+                \"criticality\": \"$CRITICALITY\",
+                \"service_type\": \"$SERVICE_TYPE\",
+                \"github_url\": \"https://github.com/$ORG/$SERVICE_NAME\",
+                \"github_visibility\": \"private\",
+                \"github_language\": \"$([ "$STACK" = "python" ] && echo "Python" || echo "TypeScript")\",
+                \"github_default_branch\": \"develop\",
+                \"github_description\": \"$DESCRIPTION\"
+              },
+              \"relations\": {
+                \"github_repository\": \"$SERVICE_NAME\"
+              }
+            }"
+          echo "✅ Service registered in Port"
+
+      - name: Summary
+        run: |
+          echo "## ✅ Service scaffolded successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Name** | $SERVICE_NAME |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Type** | $SERVICE_TYPE |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Team** | $TEAM |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Stack** | $STACK |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Criticality** | $CRITICALITY |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Repo** | [orbisdata-cl/$SERVICE_NAME](https://github.com/orbisdata-cl/$SERVICE_NAME) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Port** | [View in Port](https://app.port.io/services/$SERVICE_NAME) |" >> $GITHUB_STEP_SUMMARY
