@@ -92,15 +92,12 @@ jobs:
             --field role="member"
           echo "✅ Added to team: $PROYECTO"
 
-      - name: Add to equipo tecnico team
+      - name: Add to sistemas-internos (org parent team)
         run: |
-          gh api orgs/$ORG/teams/$EQUIPO_TECNICO/memberships/$GITHUB_USERNAME \
-            --method PUT \
-            --field role="member" 2>/dev/null || \
-          gh api orgs/$ORG/teams/${EQUIPO_TECNICO//_/-}/memberships/$GITHUB_USERNAME \
+          gh api orgs/$ORG/teams/sistemas-internos/memberships/$GITHUB_USERNAME \
             --method PUT \
             --field role="member"
-          echo "✅ Added to equipo: $EQUIPO_TECNICO"
+          echo "✅ Added to sistemas-internos"
 
       - name: Register in Port
         run: |
