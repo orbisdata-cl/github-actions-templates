@@ -249,11 +249,21 @@ jobs:
           - **Sonar**: [View analysis](https://sonar.orbisdata.cl/dashboard?id=$SERVICE_NAME)
           READMEEOF
 
-          gh api repos/$ORG/$SERVICE_NAME/contents/README.md \
-            --method PUT \
-            --field message="docs: initial README" \
-            --field content="$(base64 < /tmp/README.md)" \
-            --field branch="develop"
+          README_SHA=$(gh api repos/$ORG/$SERVICE_NAME/contents/README.md --jq ".sha" 2>/dev/null || echo "")
+          if [ -n "$README_SHA" ]; then
+            gh api repos/$ORG/$SERVICE_NAME/contents/README.md \
+              --method PUT \
+              --field message="docs: initial README" \
+              --field content="$(base64 < /tmp/README.md)" \
+              --field sha="$README_SHA" \
+              --field branch="develop"
+          else
+            gh api repos/$ORG/$SERVICE_NAME/contents/README.md \
+              --method PUT \
+              --field message="docs: initial README" \
+              --field content="$(base64 < /tmp/README.md)" \
+              --field branch="develop"
+          fi
           echo "✅ README created"
 
       - name: Set CI workflow
