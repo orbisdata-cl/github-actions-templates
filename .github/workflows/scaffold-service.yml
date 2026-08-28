@@ -266,126 +266,18 @@ jobs:
           fi
           echo "✅ README created"
 
+      - name: Checkout templates
+        uses: actions/checkout@v4
+        with:
+          path: templates-repo
+
       - name: Set CI workflow
         run: |
-          cat > /tmp/ci.yml << CIEOF
-          name: CI
-
-          on:
-            pull_request:
-              branches:
-                - develop
-                - main
-
-          jobs:
-            lint:
-              name: Lint
-              runs-on: ubuntu-latest
-              steps:
-                - uses: actions/checkout@v4
-                - uses: actions/setup-node@v4
-                  with:
-                    node-version: lts/*
-                    cache: npm
-                - run: npm ci
-                - run: npm run lint
-
-            test:
-              name: Test & Coverage
-              runs-on: ubuntu-latest
-              steps:
-                - uses: actions/checkout@v4
-                - uses: actions/setup-node@v4
-                  with:
-                    node-version: lts/*
-                    cache: npm
-                - run: npm ci
-                - run: npm run test:coverage
-                - uses: actions/upload-artifact@v4
-                  if: always()
-                  with:
-                    name: coverage-report
-                    path: coverage/
-                    retention-days: 7
-
-            sonar:
-              name: SonarQube Analysis
-              runs-on: ubuntu-latest
-              needs: [test]
-              if: needs.test.result == 'success'
-              steps:
-                - uses: actions/checkout@v4
-                  with:
-                    fetch-depth: 0
-                - uses: actions/setup-node@v4
-                  with:
-                    node-version: lts/*
-                    cache: npm
-                - run: npm ci
-                - uses: actions/download-artifact@v4
-                  with:
-                    name: coverage-report
-                    path: coverage/
-                - name: Generate GitHub App token
-                  id: app-token
-                  uses: actions/create-github-app-token@v1
-                  with:
-                    app-id: \${{ secrets.SONAR_APP_ID }}
-                    private-key: \${{ secrets.SONAR_APP_PRIVATE_KEY }}
-                - uses: SonarSource/sonarqube-scan-action@master
-                  env:
-                    SONAR_TOKEN: \${{ secrets.SONAR_TOKEN }}
-                    SONAR_HOST_URL: \${{ secrets.SONAR_HOST_URL }}
-                    GITHUB_TOKEN: \${{ steps.app-token.outputs.token }}
-
-            notify:
-              name: Notify Discord
-              runs-on: ubuntu-latest
-              needs: [lint, test, sonar]
-              if: always()
-              steps:
-                - name: Send Discord notification
-                  env:
-                    DISCORD_WEBHOOK: \${{ secrets.DISCORD_WEBHOOK_URL }}
-                    ACTOR: \${{ github.actor }}
-                    PR_TITLE: \${{ github.event.pull_request.title }}
-                    PR_URL: \${{ github.event.pull_request.html_url }}
-                    RUN_URL: \${{ github.server_url }}/\${{ github.repository }}/actions/runs/\${{ github.run_id }}
-                    LINT_RESULT: \${{ needs.lint.result }}
-                    TEST_RESULT: \${{ needs.test.result }}
-                    SONAR_RESULT: \${{ needs.sonar.result }}
-                  run: |
-                    AVATAR="https://github.com/\$ACTOR.png?size=32"
-                    TIMESTAMP=\$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-                    LINT_ICON=\$( [ "\$LINT_RESULT"  = "success" ] && echo "✅" || ([ "\$LINT_RESULT"  = "skipped" ] && echo "⏭️" || echo "❌"))
-                    TEST_ICON=\$( [ "\$TEST_RESULT"  = "success" ] && echo "✅" || ([ "\$TEST_RESULT"  = "skipped" ] && echo "⏭️" || echo "❌"))
-                    SONAR_ICON=\$([ "\$SONAR_RESULT" = "success" ] && echo "✅" || ([ "\$SONAR_RESULT" = "skipped" ] && echo "⏭️" || echo "❌"))
-                    if [ "\$LINT_RESULT" = "success" ] && [ "\$TEST_RESULT" = "success" ] && [ "\$SONAR_RESULT" = "success" ]; then
-                      TITLE="✅ CI OK — $SERVICE_NAME"
-                      COLOR=3066993
-                    else
-                      TITLE="❌ CI fallido — $SERVICE_NAME"
-                      COLOR=15158332
-                    fi
-                    jq -n \
-                      --arg title "\$TITLE" \
-                      --argjson color "\$COLOR" \
-                      --arg actor "\$ACTOR" \
-                      --arg avatar "\$AVATAR" \
-                      --arg pr "[\${PR_TITLE}](\${PR_URL})" \
-                      --arg lint "\$LINT_ICON Lint" \
-                      --arg test "\$TEST_ICON Test" \
-                      --arg sonar "\$SONAR_ICON Sonar" \
-                      --arg run_url "[Ver logs](\$RUN_URL)" \
-                      --arg ts "\$TIMESTAMP" \
-                      '{embeds:[{author:{name:\$actor,icon_url:\$avatar},title:\$title,color:\$color,fields:[{name:"🔀 PR",value:\$pr,inline:false},{name:"🔍 Lint",value:\$lint,inline:true},{name:"🧪 Test",value:\$test,inline:true},{name:"📊 Sonar",value:\$sonar,inline:true},{name:"🔗 Logs",value:\$run_url,inline:false}],timestamp:\$ts}]}' \
-                      | curl -s -X POST -H 'Content-Type: application/json' -d @- "\$DISCORD_WEBHOOK"
-          CIEOF
-
+          # Copiar el template desde el repo — sin heredocs, sin expansión de variables
           gh api repos/$ORG/$SERVICE_NAME/contents/.github/workflows/ci.yml \
             --method PUT \
             --field message="ci: add CI workflow" \
-            --field content="$(base64 < /tmp/ci.yml)" \
+            --field content="$(base64 < templates-repo/templates/ci.yml)" \
             --field branch="develop"
           echo "✅ CI workflow created"
 
