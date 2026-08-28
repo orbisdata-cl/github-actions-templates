@@ -3,8 +3,8 @@ name: Onboard Developer
 on:
   workflow_dispatch:
     inputs:
-      github_username:
-        description: "GitHub username"
+      github_username_or_email:
+        description: "GitHub username OR email address"
         required: true
         type: string
       full_name:
@@ -45,13 +45,28 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.SCAFFOLD_GH_TOKEN }}
       ORG: orbisdata-cl
-      GITHUB_USERNAME: ${{ inputs.github_username }}
+      INPUT: ${{ inputs.github_username_or_email }}
       FULL_NAME: ${{ inputs.full_name }}
       EQUIPO_TECNICO: ${{ inputs.equipo_tecnico }}
       PROYECTO: ${{ inputs.proyecto }}
 
     steps:
-      - name: Validate GitHub user exists
+      - name: Detect input type (username or email)
+        run: |
+          if echo "$INPUT" | grep -qE '^[^@]+@[^@]+\.[^@]+$'; then
+            echo "INPUT_TYPE=email" >> $GITHUB_ENV
+            echo "EMAIL=$INPUT" >> $GITHUB_ENV
+            echo "GITHUB_USERNAME=" >> $GITHUB_ENV
+            echo "ℹ️ Input detected as email: $INPUT"
+          else
+            echo "INPUT_TYPE=username" >> $GITHUB_ENV
+            echo "GITHUB_USERNAME=$INPUT" >> $GITHUB_ENV
+            echo "EMAIL=" >> $GITHUB_ENV
+            echo "ℹ️ Input detected as GitHub username: $INPUT"
+          fi
+
+      - name: Validate GitHub user exists (username only)
+        if: env.INPUT_TYPE == 'username'
         run: |
           STATUS=$(gh api users/$GITHUB_USERNAME --silent 2>&1 && echo "exists" || echo "not_found")
           if [ "$STATUS" = "not_found" ]; then
@@ -60,57 +75,74 @@ jobs:
           fi
           echo "✅ GitHub user found: $GITHUB_USERNAME"
 
-      - name: Check user not already in org
+      - name: Check user not already in org (username only)
+        if: env.INPUT_TYPE == 'username'
         run: |
           STATUS=$(gh api orgs/$ORG/members/$GITHUB_USERNAME --silent 2>&1 && echo "member" || echo "not_member")
           if [ "$STATUS" = "member" ]; then
-            echo "⚠️ User $GITHUB_USERNAME is already a member of the org. Skipping invitation."
+            echo "⚠️ User $GITHUB_USERNAME is already a member. Skipping invitation."
             echo "ALREADY_MEMBER=true" >> $GITHUB_ENV
           else
             echo "ALREADY_MEMBER=false" >> $GITHUB_ENV
             echo "✅ User is not yet a member"
           fi
 
-      - name: Invite to org
-        if: env.ALREADY_MEMBER == 'false'
+      - name: Invite by username
+        if: env.INPUT_TYPE == 'username' && env.ALREADY_MEMBER == 'false'
         run: |
           USER_ID=$(gh api users/$GITHUB_USERNAME --jq '.id')
           gh api orgs/$ORG/invitations \
             --method POST \
             --field invitee_id=$USER_ID \
             --field role="direct_member"
-          echo "✅ Invitation sent to $GITHUB_USERNAME"
+          echo "✅ Invitation sent to @$GITHUB_USERNAME"
 
-      - name: Add to proyecto team
+      - name: Invite by email (no GitHub account required)
+        if: env.INPUT_TYPE == 'email'
+        run: |
+          gh api orgs/$ORG/invitations \
+            --method POST \
+            --field email="$EMAIL" \
+            --field role="direct_member"
+          echo "✅ Email invitation sent to $EMAIL"
+          echo "ALREADY_MEMBER=false" >> $GITHUB_ENV
+
+      - name: Add to proyecto team (username only)
+        if: env.INPUT_TYPE == 'username'
         run: |
           gh api orgs/$ORG/teams/$PROYECTO/memberships/$GITHUB_USERNAME \
             --method PUT \
             --field role="member"
           echo "✅ Added to team: $PROYECTO"
 
-      - name: Add to sistemas-internos (org parent team)
+      - name: Add to sistemas-internos (username only)
+        if: env.INPUT_TYPE == 'username'
         run: |
           gh api orgs/$ORG/teams/sistemas-internos/memberships/$GITHUB_USERNAME \
             --method PUT \
             --field role="member"
           echo "✅ Added to sistemas-internos"
 
+      - name: Note for email invites
+        if: env.INPUT_TYPE == 'email'
+        run: |
+          echo "ℹ️ Teams will be assigned when the user accepts the invitation and creates their GitHub account."
+          echo "   Ask them to share their GitHub username once they accept, then run the onboarding again."
+
       - name: Register in Port
+        if: env.INPUT_TYPE == 'username'
         run: |
           TOKEN=$(curl -s -X POST "https://api.port.io/v1/auth/access_token" \
             -H "Content-Type: application/json" \
             -d "{\"clientId\": \"${{ inputs.port_client_id }}\", \"clientSecret\": \"${{ inputs.port_client_secret }}\"}" \
             | jq -r '.accessToken')
 
-          # Upsert githubUser entity
           curl -s -X PATCH "https://api.port.io/v1/blueprints/githubUser/entities/$GITHUB_USERNAME" \
             -H "Authorization: Bearer $TOKEN" \
             -H "Content-Type: application/json" \
             -d "{
               \"title\": \"$FULL_NAME\",
-              \"properties\": {
-                \"login\": \"$GITHUB_USERNAME\"
-              }
+              \"properties\": {\"login\": \"$GITHUB_USERNAME\"}
             }" | jq '{ok: .ok}'
 
           echo "✅ Registered in Port"
@@ -119,21 +151,29 @@ jobs:
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_NOTIFICATIONS }}
         run: |
-          AVATAR="https://github.com/$GITHUB_USERNAME.png?size=64"
           TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          ALREADY=${{ env.ALREADY_MEMBER }}
 
-          if [ "$ALREADY" = "true" ]; then
-            INVITE_STATUS="⚠️ Ya era miembro de la org"
+          if [ "$INPUT_TYPE" = "email" ]; then
+            AVATAR="https://www.gravatar.com/avatar/?d=identicon"
+            IDENTIFIER="$EMAIL"
+            INVITE_STATUS="📧 Invitación por email enviada — pendiente aceptación"
+            TEAM_STATUS="⏳ Teams se asignarán cuando acepte"
           else
-            INVITE_STATUS="✅ Invitación enviada"
+            AVATAR="https://github.com/$GITHUB_USERNAME.png?size=64"
+            IDENTIFIER="@$GITHUB_USERNAME"
+            if [ "$ALREADY_MEMBER" = "true" ]; then
+              INVITE_STATUS="⚠️ Ya era miembro de la org"
+            else
+              INVITE_STATUS="✅ Invitación enviada"
+            fi
+            TEAM_STATUS="✅ $PROYECTO + sistemas-internos"
           fi
 
           jq -n \
-            --arg name "$FULL_NAME (@$GITHUB_USERNAME)" \
+            --arg name "$FULL_NAME ($IDENTIFIER)" \
             --arg avatar "$AVATAR" \
             --arg equipo "$EQUIPO_TECNICO" \
-            --arg proyecto "$PROYECTO" \
+            --arg teams "$TEAM_STATUS" \
             --arg invite "$INVITE_STATUS" \
             --arg ts "$TIMESTAMP" \
             '{
@@ -142,9 +182,8 @@ jobs:
                 title: "👋 Nuevo developer onboarded",
                 color: 3066993,
                 fields: [
-                  {name: "👤 GitHub", value: $name, inline: false},
                   {name: "🏢 Equipo técnico", value: $equipo, inline: true},
-                  {name: "📦 Proyecto", value: $proyecto, inline: true},
+                  {name: "📦 Teams", value: $teams, inline: true},
                   {name: "📬 Invitación", value: $invite, inline: false}
                 ],
                 timestamp: $ts
@@ -155,11 +194,16 @@ jobs:
 
       - name: Summary
         run: |
-          echo "## 👋 Developer onboarded successfully" >> $GITHUB_STEP_SUMMARY
+          echo "## 👋 Developer onboarded" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
           echo "| **Name** | $FULL_NAME |" >> $GITHUB_STEP_SUMMARY
-          echo "| **GitHub** | [@$GITHUB_USERNAME](https://github.com/$GITHUB_USERNAME) |" >> $GITHUB_STEP_SUMMARY
+          if [ "$INPUT_TYPE" = "email" ]; then
+            echo "| **Email** | $EMAIL |" >> $GITHUB_STEP_SUMMARY
+            echo "| **Status** | Invitation sent — pending acceptance |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| **GitHub** | [@$GITHUB_USERNAME](https://github.com/$GITHUB_USERNAME) |" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "| **Equipo técnico** | $EQUIPO_TECNICO |" >> $GITHUB_STEP_SUMMARY
           echo "| **Proyecto** | $PROYECTO |" >> $GITHUB_STEP_SUMMARY
